@@ -1,69 +1,91 @@
-# MoodTrack Demo
+# MoodTrack
 
-MoodTrack 是一个课程 demo 项目，采用前后端分离架构，**后端与 ACE-Step 1.5 合并为同一个服务**。
+MoodTrack is a Vue/Vite music-creation interface with a local ACE-Step 1.5
+generation API. The browser application runs on port `5173`; ACE-Step runs on
+`127.0.0.1:8001` and is exposed to the app through `/ace-step`.
+
+## Project layout
 
 ```text
-frontend/   Vue 3 + Vite 前端
-backend/    MoodTrack 业务路由（启动时合并 ACE-Step）
-ace-step/   ACE-Step 1.5 官方开源模型
+frontend/                         Vue 3 + Vite application and local watchdog
+frontend/services/ACE-Step-1.5/   ACE-Step 1.5 inference service
+backend/                          Earlier standalone backend implementation
+heartbeat/                        HeartArt/Video2Music application variant
+services/GVMGen/                  Video-to-music service source
 ```
 
-## 环境要求
+## Requirements
 
-- Python 3.11（推荐 conda 环境）
-- NVIDIA GPU（RTX 3070 8 GB 可跑 2B turbo 模型）
-- Node.js ≥ 18（前端）
+- Windows 10/11 and PowerShell 7 or Windows PowerShell
+- Python 3.11 or 3.12
+- [uv](https://docs.astral.sh/uv/) available on `PATH`
+- Node.js 18+ and pnpm
+- NVIDIA driver and CUDA-capable GPU recommended (the checked-in configuration
+  uses `cuda`)
+- Internet access on the first run so ACE-Step can fetch its model weights
 
-## 1. 安装 ACE-Step 依赖
+Model weights, virtual environments, generated audio, and local databases are
+intentionally ignored by Git. They must be downloaded or generated locally.
+
+## ACE-Step setup
+
+### 1. Install the ACE-Step environment
 
 ```powershell
-conda activate py11
-cd ace-step
-pip install -e .
-# 或者使用 uv:  uv sync
+cd frontend\services\ACE-Step-1.5
+uv sync
 ```
 
-> ACE-Step 会自动安装 torch、transformers、fastapi、uvicorn 等依赖。
-> MoodTrack 后端额外依赖很少，见 `backend/requirements.txt`。
+`uv sync` creates the local environment and installs the dependency versions
+defined by ACE-Step. Do not commit the resulting `.venv` directory.
+
+### 2. Configure the API
+
+The project startup script is
+[`frontend/scripts/start-ace-step.ps1`](frontend/scripts/start-ace-step.ps1).
+It sets the following defaults before it invokes `uv run acestep-api`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ACESTEP_API_HOST` | `127.0.0.1` | Local-only API binding |
+| `ACESTEP_API_PORT` | `8001` | ACE-Step HTTP port |
+| `ACESTEP_CONFIG_PATH` | `acestep-v15-turbo` | Main inference model |
+| `ACESTEP_INIT_LLM` | `true` | Load the language model at startup |
+| `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-1.7B` | Language-model checkpoint |
+| `ACESTEP_LM_BACKEND` | `pt` | PyTorch language-model backend |
+| `ACESTEP_DEVICE` | `cuda` | Inference device; use `cpu` only for troubleshooting |
+| `ACESTEP_BATCH_SIZE` | `1` | GPU batch size; keep at `1` on lower-VRAM cards |
+| `ACESTEP_DOWNLOAD_SOURCE` | `auto` | Automatically obtain missing supported weights |
+
+For a different GPU setup, copy the script or set variables in the PowerShell
+session before starting it. For example, to run on CPU for a connectivity test:
 
 ```powershell
-cd ..\backend
-pip install -r requirements.txt
+$env:ACESTEP_DEVICE = 'cpu'
+$env:ACESTEP_BATCH_SIZE = '1'
+uv run acestep-api
 ```
 
-## 2. 启动后端（单服务）
+CPU inference is much slower and is not suitable for normal music generation.
+
+### 3. Start ACE-Step
+
+From `frontend`, run:
 
 ```powershell
-cd backend
-uvicorn app.main:app --host 0.0.0.0 --port 8080
+.\scripts\start-ace-step.ps1
 ```
 
-这个**单进程**同时提供：
-
-| 路径 | 来源 | 说明 |
-|------|------|------|
-| `POST /release_task` | ACE-Step | 提交音乐生成任务 |
-| `POST /query_result` | ACE-Step | 查询任务结果 |
-| `GET /v1/audio?path=…` | ACE-Step | 下载生成的音频 |
-| `GET /health` | ACE-Step | 健康检查 |
-| `GET /api/health` | MoodTrack | MoodTrack 健康检查 |
-| `POST /api/projects` | MoodTrack | 创建项目 |
-| `POST /api/projects/{id}/plan` | MoodTrack | 生成音乐规划 |
-| `POST /api/projects/{id}/generations` | MoodTrack | 提交生成任务 |
-
-**不再需要单独启动 ACE-Step API Server。**
-
-### 仅调试前端（不加载模型）
+On the first start, wait for model initialization to finish. Confirm that the
+API is ready in a second PowerShell window:
 
 ```powershell
-$env:MUSIC_PROVIDER="mock"
-uvicorn app.main:app --host 0.0.0.0 --port 8080
+Invoke-RestMethod http://127.0.0.1:8001/health
 ```
 
-> mock 模式下 ACE-Step 模型仍会加载，但生成接口返回静音占位音频。
-> 如果想完全跳过模型加载，可临时注释 `main.py` 中的 ACE-Step 导入。
+The response should contain `status: ok` and `models_initialized: true`.
 
-## 3. 启动前端
+## Start MoodTrack
 
 ```powershell
 cd frontend
@@ -71,47 +93,40 @@ pnpm install
 pnpm dev
 ```
 
-前端地址：`http://localhost:5173`
+Open <http://127.0.0.1:5173/>. With ACE-Step running, verify the Vite proxy:
 
-## 4. 使用流程
-
-```text
-1. 启动后端:  uvicorn app.main:app --port 8080
-2. 启动前端:  pnpm dev
-3. 浏览器打开 http://localhost:5173
-4. 创建项目 → 编辑情绪轨道 → 生成音乐规划 → 调用 ACE-Step 生成音乐
+```powershell
+Invoke-RestMethod http://127.0.0.1:5173/ace-step/health
 ```
 
-## 5. 项目结构
+## Start the local watchdog
 
-```text
-music/
-├── ace-step/                 # ACE-Step 1.5 源码（pip install -e .）
-├── backend/
-│   ├── app/
-│   │   ├── main.py           # 合并入口：ACE-Step app + MoodTrack 路由
-│   │   ├── providers.py      # 调用同进程 /release_task 接口
-│   │   ├── schemas.py        # Pydantic 数据模型
-│   │   ├── services.py       # 情绪轨道 → 音乐规划 → Prompt
-│   │   └── store.py          # 内存存储
-│   ├── requirements.txt
-│   └── storage/audio/        # 生成的音频文件
-├── frontend/                 # Vue 3 + Vite 前端
-├── docs/                     # 设计文档
-└── README.md
+The watchdog verifies the Vite app, ACE-Step API, and Cloudflare tunnel. Run
+it in a dedicated PowerShell window from `frontend`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\watchdog.ps1
 ```
 
-## 6. 已实现功能
+It only restarts a component when that component has exited. Do not run
+multiple watchdog instances at the same time.
 
-- 情绪轨道编辑 → 音乐结构规划 → ACE-Step Prompt 自动生成
-- 调用 ACE-Step `/release_task` 提交 text2music / repaint 任务
-- 轮询 `/query_result` 获取结果，下载 `/v1/audio` 音频
-- Vue 前端：项目管理、情绪节点编辑、Prompt 预览、音频播放
-- **单服务架构**：一个 uvicorn 进程同时运行 ACE-Step 推理 + MoodTrack 业务
+## Troubleshooting
 
-## 7. 后续可扩展
+- **`uv` is not found:** install uv, reopen PowerShell, then run `uv --version`.
+- **ACE-Step health check fails:** inspect the ACE-Step terminal first; verify
+  Python, CUDA driver compatibility, available disk space, and model download.
+- **`models_initialized` is false:** wait for the first model load or remove a
+  partial checkpoint and restart so it can download again.
+- **Frontend works but generation fails:** confirm both
+  `http://127.0.0.1:8001/health` and
+  `http://127.0.0.1:5173/ace-step/health` return `ok`.
+- **Out-of-memory errors:** keep batch size at `1`, close other GPU workloads,
+  and use the Turbo configuration.
 
-- repaint 局部编辑前端交互
-- cover 风格转换
-- SQLite 持久化
-- 视频上传与事件点标记
+## Git hygiene
+
+This repository includes integration code plus third-party service sources.
+Do not commit checkpoints, `.venv`, `node_modules`, generated audio, databases,
+or tunnel URLs. See [`.gitignore`](.gitignore) for the complete local-only
+file list.
