@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.vite-demo.log
+.vite-demo.err.log
+.tunnel.log
+.tunnel.err.log
+.tunnel-url.txt
+.watchdog.log
+.watchdog.out.log
+.watchdog.err.log
+services/ACE-Step-1.5/
+.ace-step.out.log
+.ace-step.err.log
+*.tgz

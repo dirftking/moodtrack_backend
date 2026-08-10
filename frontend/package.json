@@ -1,0 +1,15 @@
+{
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build && node scripts/prepare-sites-build.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "latest",
+    "vite": "latest",
+    "vue": "latest",
+    "typescript": "latest",
+    "vue-tsc": "latest"
+  },
+  "devDependencies": {}
+}

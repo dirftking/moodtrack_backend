@@ -1,0 +1,1 @@
+dora -P module run solver=gvmgen/gvmgen model/lm/model_scale=small continue_from=checkpoints/state_dict.bin dataset.batch_size=2 optim.updates_per_epoch=5 dataset.valid.num_samples=10

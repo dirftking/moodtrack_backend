@@ -1,0 +1,5 @@
+# MoodTrack 后端额外依赖（ACE-Step 已包含 fastapi / uvicorn / pydantic）
+# 请先安装 ACE-Step:  pip install -e ../ace-step
+# 或者在 ace-step 目录执行:  uv sync
+requests>=2.32.0
+python-multipart>=0.0.20

@@ -1,0 +1,19 @@
+{
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/clean-sites-build.mjs && vue-tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "6.0.7",
+    "vite": "8.0.14",
+    "vue": "3.5.34",
+    "typescript": "6.0.3",
+    "vue-tsc": "3.3.2"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.37.1",
+    "wrangler": "4.92.0"
+  }
+}

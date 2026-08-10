@@ -1,0 +1,27 @@
+# Python and Node.js dependencies
+**/.venv/
+**/node_modules/
+**/__pycache__/
+**/.pytest_cache/
+
+# Downloaded model weights and partial downloads
+**/checkpoints/
+**/*.part
+
+# Generated application data
+backend/backend/storage/
+**/storage/audio/
+*.db
+*.sqlite
+
+# Local runtime configuration and logs
+.tunnel-url.txt
+*.log
+
+# Packaged build artifacts
+*.tgz
+*.tar.gz
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
