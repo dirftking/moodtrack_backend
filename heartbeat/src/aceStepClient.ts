@@ -200,11 +200,22 @@ function parseGeneratedFiles(value: TaskResult['result']) {
 }
 
 function proxiedAudioUrl(file: string) {
-  if (file.startsWith('http://') || file.startsWith('https://')) {
-    const url = new URL(file)
-    return `${API_BASE}${url.pathname}${url.search}`
+  const raw = file.trim()
+  if (!raw) throw new Error('HeartArt 没有返回音频地址')
+
+  // ACE-Step may return an absolute file path, a /v1/audio URL, or a full URL.
+  // The public proxy only exposes the safe /v1/audio endpoint, so normalize all
+  // of these forms instead of attempting to fetch ACE-Step's private path.
+  try {
+    const url = new URL(raw, 'http://heartart.local')
+    if (url.pathname === '/v1/audio' && url.searchParams.get('path')) {
+      return `${API_BASE}/v1/audio?path=${encodeURIComponent(url.searchParams.get('path')!)}`
+    }
+  } catch {
+    // Treat malformed URLs as a raw ACE-Step file path; the gateway validates it.
   }
-  return `${API_BASE}${file.startsWith('/') ? '' : '/'}${file}`
+
+  return `${API_BASE}/v1/audio?path=${encodeURIComponent(raw)}`
 }
 
 export async function checkAceStepHealth() {
