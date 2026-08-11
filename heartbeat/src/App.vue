@@ -384,7 +384,7 @@ async function showVideoOutput() {
 
 async function generateVideoMusic() {
   const analysis = videoAnalysis.value ?? await analyzeSelectedVideo()
-  if (!analysis || !videoFile.value || gvmgenGenerating.value) return
+  if (!analysis || !videoFile.value || gvmgenGenerating.value || generating.value || repainting.value) return
   applyVideoPlan(analysis)
   gvmgenGenerating.value = true
   videoError.value = ''
@@ -422,7 +422,7 @@ async function generateVideoMusic() {
 }
 
 async function generateMusic(videoPlan: VideoMusicAnalysis | null = null) {
-  if (generating.value || repainting.value) return
+  if (generating.value || repainting.value || gvmgenGenerating.value) return
   const visualPlan = videoPlan ?? (videoModeActive.value ? videoAnalysis.value : null)
   generating.value = true
   generated.value = false
@@ -551,7 +551,7 @@ function pauseOtherVersionAudio(event: Event) {
 }
 
 async function repaintMusic() {
-  if (generating.value || repainting.value) return
+  if (generating.value || repainting.value || gvmgenGenerating.value) return
   const source = selectedSourceVersion.value
   if (!source) {
     notice.value = '请先完整生成一首音乐，再进行局部修改'
@@ -792,7 +792,7 @@ onBeforeUnmount(() => {
             <button v-else class="video-dropzone" type="button" @click="chooseVideo">
               <span class="video-upload-icon">▶</span>
               <strong>拖入视频，或点击选择</strong>
-              <small>MP4 · WEBM · MOV · 最大 95MB</small>
+                <small>MP4 · WEBM · MOV · 最大 95MB · 最长生成 30 秒</small>
             </button>
 
             <div class="video-pipeline">
@@ -833,7 +833,7 @@ onBeforeUnmount(() => {
                 <div class="video-palette"><i v-for="color in videoAnalysis.palette" :key="color" :style="{ background: color }"></i></div>
               </div>
               <p>{{ videoAnalysis.description }}</p>
-              <button class="button video-generate-button" type="button" :disabled="gvmgenGenerating || !gvmgenOnline" @click="generateVideoMusic">
+              <button class="button video-generate-button" type="button" :disabled="gvmgenGenerating || !gvmgenOnline || generating || repainting" @click="generateVideoMusic">
                 <span>✦</span>{{ !gvmgenOnline ? 'HeartArt 模型准备中' : gvmgenGenerating ? `${videoStatus} ${videoProgress}%` : 'HeartArt 生成并渲染' }}
               </button>
               <div v-if="gvmgenGenerating" class="video-progress"><i :style="{ width: `${videoProgress}%` }"></i></div>
@@ -965,7 +965,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <button class="button generate-button" type="button" :disabled="generating || repainting" @click="generateMusic()">
+            <button class="button generate-button" type="button" :disabled="generating || repainting || gvmgenGenerating" @click="generateMusic()">
               <span class="spark">✦</span>
               {{ generating ? '正在编织声音…' : repainting ? '正在局部修改…' : generated ? '重新生成配乐' : '生成我的配乐' }}
               <small>{{ generating || repainting ? 'HEARTART PROCESSING' : 'ABOUT 60 SECONDS' }}</small>
@@ -1089,7 +1089,7 @@ onBeforeUnmount(() => {
               <small>低强度更接近原版，高强度会产生更明显的新编曲。</small>
             </label>
 
-            <button class="button revision-button" type="button" :disabled="generating || repainting" @click="repaintMusic">
+            <button class="button revision-button" type="button" :disabled="generating || repainting || gvmgenGenerating" @click="repaintMusic">
               <span>✦</span>{{ repainting ? 'HeartArt 正在局部重绘…' : '生成局部修改版本' }}
             </button>
           </section>

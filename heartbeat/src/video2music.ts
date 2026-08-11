@@ -41,9 +41,14 @@ function clamp(value: number, minimum: number, maximum: number) {
   return Math.max(minimum, Math.min(maximum, value))
 }
 
-function waitFor(target: EventTarget, eventName: string, errorName = 'error') {
+function waitFor(target: EventTarget, eventName: string, errorName = 'error', timeout = 15_000) {
   return new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('读取视频超时，请尝试 MP4（H.264）格式'))
+    }, timeout)
     const cleanup = () => {
+      window.clearTimeout(timer)
       target.removeEventListener(eventName, onReady)
       target.removeEventListener(errorName, onError)
     }
@@ -145,7 +150,7 @@ export async function analyzeVideoFile(
     if (!Number.isFinite(video.duration) || video.duration <= 0) throw new Error('没有读到有效的视频时长')
 
     const duration = video.duration
-    const musicDuration = clamp(Math.round(duration), 15, 180)
+    const musicDuration = clamp(Math.round(duration), 15, 30)
     const sampleCount = clamp(Math.round(duration / 4), 16, 28)
     const canvas = document.createElement('canvas')
     canvas.width = ANALYSIS_WIDTH

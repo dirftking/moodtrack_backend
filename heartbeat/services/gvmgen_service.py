@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response, StreamingResponse
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,60 @@ jobs_lock = threading.Lock()
 model_lock = threading.Lock()
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gvmgen")
 model = None
+
+
+def stream_file(path: Path, start: int, end: int):
+    with path.open("rb") as source:
+        source.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            chunk = source.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def media_response(path: Path, media_type: str, range_header):
+    size = path.stat().st_size
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store",
+        "Content-Disposition": f'inline; filename="{path.name}"',
+    }
+    if not range_header:
+        headers["Content-Length"] = str(size)
+        return StreamingResponse(stream_file(path, 0, size - 1), media_type=media_type, headers=headers)
+
+    try:
+        unit, value = range_header.split("=", 1)
+        if unit.strip().lower() != "bytes" or "," in value:
+            raise ValueError
+        start_text, end_text = value.split("-", 1)
+        if start_text:
+            start = int(start_text)
+            end = min(int(end_text), size - 1) if end_text else size - 1
+        else:
+            suffix = int(end_text)
+            if suffix <= 0:
+                raise ValueError
+            start = max(0, size - suffix)
+            end = size - 1
+        if start < 0 or start >= size or end < start:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"})
+
+    headers.update({
+        "Content-Range": f"bytes {start}-{end}/{size}",
+        "Content-Length": str(end - start + 1),
+    })
+    return StreamingResponse(
+        stream_file(path, start, end),
+        status_code=206,
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 def model_ready() -> bool:
@@ -151,27 +205,60 @@ def video_duration(video_path: Path) -> float:
 def render_video(video_path: Path, audio_path: Path, output_path: Path, duration: float) -> None:
     ffmpeg = str(FFMPEG if FFMPEG.exists() else "ffmpeg")
     base = [ffmpeg, "-y", "-i", str(video_path), "-i", str(audio_path), "-t", f"{duration:.3f}", "-map", "0:v:0", "-map", "1:a:0"]
-    copy_command = [*base, "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output_path)]
+    copy_command = [*base, "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(output_path)]
     completed = subprocess.run(copy_command, capture_output=True, text=True)
     if completed.returncode == 0:
         return
-    encode_command = [*base, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output_path)]
+    encode_command = [*base, "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(output_path)]
     subprocess.run(encode_command, check=True, capture_output=True, text=True)
+
+
+def normalize_video(video_path: Path, output_path: Path, duration: int) -> None:
+    ffmpeg = str(FFMPEG if FFMPEG.exists() else "ffmpeg")
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(video_path),
+            "-t",
+            str(duration),
+            "-an",
+            "-vf",
+            "fps=30",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def run_generation(job_id: str, video_path: Path, requested_duration: int) -> None:
     job_dir = OUTPUT_ROOT / job_id
     audio_path = job_dir / "music.wav"
+    analysis_path = job_dir / "analysis.mp4"
     rendered_path = job_dir / "rendered-video.mp4"
     metadata_path = job_dir / "worker-result.json"
     try:
         update_job(job_id, status="loading", progress=18, message="正在加载 HeartArt 视频配乐模型…")
         update_job(job_id, status="generating", progress=34, message="HeartArt 正在进行空间层级注意力分析…")
+        normalize_video(video_path, analysis_path, requested_duration)
         worker = subprocess.run(
             [
                 sys.executable,
                 str(APP_ROOT / "services" / "gvmgen_worker.py"),
-                "--video", str(video_path),
+                "--video", str(analysis_path),
                 "--audio", str(audio_path),
                 "--metadata", str(metadata_path),
                 "--duration", str(requested_duration),
@@ -214,26 +301,30 @@ def health() -> dict[str, Any]:
 async def generate(video: UploadFile = File(...), duration: int = Form(30)) -> dict[str, str]:
     if not model_ready():
         raise HTTPException(status_code=503, detail="HeartArt 模型正在准备，请稍后再试")
-    with jobs_lock:
-        if any(job["status"] not in {"completed", "failed"} for job in jobs.values()):
-            raise HTTPException(status_code=429, detail="HeartArt 正在处理另一个视频，请稍后再试")
     if not video.filename or not video.filename.lower().endswith((".mp4", ".mov", ".m4v", ".webm")):
         raise HTTPException(status_code=400, detail="请上传 MP4、MOV、M4V 或 WebM 视频")
     job_id = uuid.uuid4().hex
-    job_dir = OUTPUT_ROOT / job_id
-    job_dir.mkdir(parents=True, exist_ok=False)
-    suffix = Path(video.filename).suffix.lower()
-    video_path = job_dir / f"source{suffix}"
-    size = 0
-    with video_path.open("wb") as destination:
-        while chunk := await video.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail="视频不能超过 750MB")
-            destination.write(chunk)
-    await video.close()
     with jobs_lock:
-        jobs[job_id] = {"id": job_id, "status": "queued", "progress": 10, "message": "视频已上传，等待 HeartArt…"}
+        if any(job["status"] not in {"completed", "failed"} for job in jobs.values()):
+            raise HTTPException(status_code=429, detail="HeartArt 正在处理另一个视频，请稍后再试")
+        jobs[job_id] = {"id": job_id, "status": "uploading", "progress": 4, "message": "正在接收视频…"}
+    job_dir = OUTPUT_ROOT / job_id
+    try:
+        job_dir.mkdir(parents=True, exist_ok=False)
+        suffix = Path(video.filename).suffix.lower()
+        video_path = job_dir / f"source{suffix}"
+        size = 0
+        with video_path.open("wb") as destination:
+            while chunk := await video.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="视频不能超过 750MB")
+                destination.write(chunk)
+        await video.close()
+        update_job(job_id, status="queued", progress=10, message="视频已上传，等待 HeartArt…")
+    except Exception:
+        update_job(job_id, status="failed", progress=100, message="视频上传失败")
+        raise
     executor.submit(run_generation, job_id, video_path, max(5, min(duration, 30)))
     return {"job_id": job_id}
 
@@ -248,11 +339,11 @@ def job_status(job_id: str) -> dict[str, Any]:
 
 
 @app.get("/files/{job_id}/{filename}")
-def download(job_id: str, filename: str):
+def download(job_id: str, filename: str, request: Request):
     if filename not in {"music.wav", "rendered-video.mp4"}:
         raise HTTPException(status_code=404, detail="文件不存在")
     path = (OUTPUT_ROOT / job_id / filename).resolve()
     if not path.is_file() or path.parent != (OUTPUT_ROOT / job_id).resolve():
         raise HTTPException(status_code=404, detail="文件不存在")
     media_type = "audio/wav" if filename.endswith(".wav") else "video/mp4"
-    return FileResponse(path, media_type=media_type, filename=filename)
+    return media_response(path, media_type, request.headers.get("range"))

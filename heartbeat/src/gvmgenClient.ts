@@ -19,6 +19,7 @@ export type GvmgenResult = {
 const API_BASE = '/gvmgen'
 const POLL_INTERVAL = 2_000
 const GENERATION_TIMEOUT = 20 * 60_000
+const MAX_TRANSIENT_FAILURES = 8
 
 function sleep(milliseconds: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds))
@@ -64,13 +65,26 @@ export async function generateGvmgenSoundtrack(
   const created = await readJson<{ job_id: string }>(await fetch(`${API_BASE}/generate`, {
     method: 'POST',
     body: form,
+    signal: AbortSignal.timeout(5 * 60_000),
   }))
   if (!created.job_id) throw new Error('HeartArt 没有返回任务编号')
 
   const startedAt = Date.now()
+  let transientFailures = 0
   while (Date.now() - startedAt < GENERATION_TIMEOUT) {
-    await sleep(POLL_INTERVAL)
-    const job = await readJson<GvmgenJob>(await fetch(`${API_BASE}/jobs/${created.job_id}`))
+    await sleep(Math.min(8_000, POLL_INTERVAL * Math.max(1, transientFailures)))
+    let job: GvmgenJob
+    try {
+      job = await readJson<GvmgenJob>(await fetch(`${API_BASE}/jobs/${created.job_id}`, {
+        signal: AbortSignal.timeout(12_000),
+      }))
+      transientFailures = 0
+    } catch (error) {
+      transientFailures += 1
+      if (transientFailures > MAX_TRANSIENT_FAILURES) throw error
+      onStatus?.('公网连接短暂波动，正在重新连接 HeartArt 任务…', 12)
+      continue
+    }
     onStatus?.(heartArtMessage(job.message), job.progress)
     if (job.status === 'failed') throw new Error(heartArtMessage(job.error, 'HeartArt 生成失败'))
     if (job.status !== 'completed') continue
