@@ -203,19 +203,23 @@ function proxiedAudioUrl(file: string) {
   const raw = file.trim()
   if (!raw) throw new Error('HeartArt 没有返回音频地址')
 
-  // ACE-Step may return an absolute file path, a /v1/audio URL, or a full URL.
-  // The public proxy only exposes the safe /v1/audio endpoint, so normalize all
-  // of these forms instead of attempting to fetch ACE-Step's private path.
+  // ACE-Step returns a URL whose query string contains the absolute Windows
+  // path. Quick Tunnel can reject that encoded path before it reaches Vite.
+  // Expose only the generated filename in the public URL and rebuild the full
+  // path inside the local middleware.
+  let audioPath = raw
   try {
     const url = new URL(raw, 'http://heartart.local')
-    if (url.pathname === '/v1/audio' && url.searchParams.get('path')) {
-      return `${API_BASE}/v1/audio?path=${encodeURIComponent(url.searchParams.get('path')!)}`
-    }
+    if (url.pathname === '/v1/audio') audioPath = url.searchParams.get('path') || raw
   } catch {
-    // Treat malformed URLs as a raw ACE-Step file path; the gateway validates it.
+    // Treat malformed URLs as a raw ACE-Step file path.
   }
 
-  return `${API_BASE}/v1/audio?path=${encodeURIComponent(raw)}`
+  const filename = audioPath.replace(/\\/g, '/').split('/').pop() || ''
+  if (!/^[a-z0-9_-]+\.(wav|wav32|mp3|flac|opus|aac)$/i.test(filename)) {
+    throw new Error('HeartArt 返回了无效的音频地址')
+  }
+  return `${API_BASE}/audio/${encodeURIComponent(filename)}`
 }
 
 export async function checkAceStepHealth() {

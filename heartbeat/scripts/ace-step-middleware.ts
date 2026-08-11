@@ -196,6 +196,17 @@ async function handleAceStepRequest(request: IncomingMessage, response: ServerRe
       return
     }
 
+    if (request.method === 'GET' && url.pathname.startsWith('/audio/')) {
+      const filename = decodeURIComponent(url.pathname.slice('/audio/'.length))
+      if (!/^[a-z0-9_-]+\.(wav|wav32|mp3|flac|opus|aac)$/i.test(filename)) {
+        sendError(response, 400, '音频地址无效')
+        return
+      }
+      const audioPath = join(ACE_STEP_AUDIO_ROOT, filename)
+      await forward(response, `/v1/audio?path=${encodeURIComponent(audioPath)}`, 'GET')
+      return
+    }
+
     if (request.method === 'GET' && url.pathname === '/v1/audio') {
       const audioPath = url.searchParams.get('path') || ''
       const safeAudioPath = /[\\/]api_audio[\\/][^\\/]+\.(wav|wav32|mp3|flac|opus|aac)$/i.test(audioPath)
