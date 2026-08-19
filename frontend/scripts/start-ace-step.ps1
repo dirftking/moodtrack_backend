@@ -13,6 +13,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $aceStepPath 'pyproject.toml'))) {
 $env:ACESTEP_API_HOST = '127.0.0.1'
 $env:ACESTEP_API_PORT = '8001'
 $env:ACESTEP_CONFIG_PATH = 'acestep-v15-turbo'
+$env:ACESTEP_NO_INIT = 'false'
 $env:ACESTEP_INIT_LLM = 'true'
 $env:ACESTEP_LM_MODEL_PATH = 'acestep-5Hz-lm-1.7B'
 $env:ACESTEP_LM_BACKEND = 'pt'

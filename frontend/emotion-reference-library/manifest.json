@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "description": "Original procedural reference clips for MoodTrack emotion conditioning.",
+  "clips": [
+    { "id": "joy-original-v1", "emotionId": "joy", "file": "audio/joy/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" },
+    { "id": "sadness-original-v1", "emotionId": "sadness", "file": "audio/sadness/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" },
+    { "id": "tension-original-v1", "emotionId": "tension", "file": "audio/tension/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" },
+    { "id": "healing-original-v1", "emotionId": "healing", "file": "audio/healing/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" },
+    { "id": "calm-original-v1", "emotionId": "calm", "file": "audio/calm/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" },
+    { "id": "hope-original-v1", "emotionId": "hope", "file": "audio/hope/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" },
+    { "id": "nostalgia-original-v1", "emotionId": "nostalgia", "file": "audio/nostalgia/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" },
+    { "id": "triumph-original-v1", "emotionId": "triumph", "file": "audio/triumph/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" },
+    { "id": "mystery-original-v1", "emotionId": "mystery", "file": "audio/mystery/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" },
+    { "id": "anger-original-v1", "emotionId": "anger", "file": "audio/anger/reference.wav", "format": "wav", "duration": 30, "license": "CC0-1.0", "source": "MoodTrack procedural generator" }
+  ]
+}

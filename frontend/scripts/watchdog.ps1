@@ -29,11 +29,42 @@ function Test-LocalSite {
   }
 }
 
-function Get-AceStepProcesses {
-  return Get-CimInstance Win32_Process | Where-Object {
-    ($_.Name -eq 'uv.exe' -and $_.CommandLine -like '*run acestep-api*') -or
-    ($_.Name -match '^python.*\.exe$' -and $_.CommandLine -like '*ACE-Step-1.5*api_server*')
+function Test-AceStepLocal {
+  try {
+    $response = Invoke-WebRequest -Uri 'http://127.0.0.1:5173/ace-step/health' -UseBasicParsing -TimeoutSec 12
+    return $response.StatusCode -eq 200
+  } catch {
+    return $false
   }
+}
+
+function Get-AceStepProcesses {
+  return @(Get-CimInstance Win32_Process | Where-Object {
+    ($_.Name -eq 'uv.exe' -and $_.CommandLine -like '*run acestep-api*') -or
+    ($_.Name -match '^python.*\.exe$' -and (
+      $_.CommandLine -like '*ACE-Step-1.5*api_server*' -or
+      $_.CommandLine -like '*acestep-api*'
+    ))
+  })
+}
+
+function Test-VideoService {
+  try {
+    $response = Invoke-RestMethod -Uri 'http://127.0.0.1:8002/health' -TimeoutSec 8
+    return $response.ready -eq $true -and
+      @('chunked', 'object-store') -contains $response.upload_mode -and
+      $response.service_version -eq '3.0.0'
+  } catch {
+    return $false
+  }
+}
+
+function Get-VideoWatchdogProcesses {
+  $expectedScript = Join-Path $projectPath 'scripts\video-watchdog.ps1'
+  return @(Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -match '^powershell(\.exe)?$' -and
+    $_.CommandLine -like "*$expectedScript*"
+  })
 }
 
 function Get-TunnelProcesses {
@@ -54,6 +85,8 @@ function Save-TunnelUrl {
 }
 
 Write-WatchdogLog 'MoodTrack watchdog started.'
+$aceLocalWasHealthy = $null
+$videoWasHealthy = $null
 
 while ($true) {
   try {
@@ -63,10 +96,37 @@ while ($true) {
       Start-Sleep -Seconds 6
     }
 
-    if (-not (Get-AceStepProcesses)) {
-      Write-WatchdogLog 'ACE-Step API was unavailable; restarting it.'
+    $aceProcesses = Get-AceStepProcesses
+    if (-not $aceProcesses) {
+      Write-WatchdogLog 'Local ACE-Step process was unavailable; restarting it.'
       Start-HiddenScript 'start-ace-step.ps1' '.ace-step.out.log' '.ace-step.err.log'
-      Start-Sleep -Seconds 10
+      Start-Sleep -Seconds 15
+    }
+
+    $aceLocalIsHealthy = Test-AceStepLocal
+    if ($aceLocalWasHealthy -ne $aceLocalIsHealthy) {
+      if ($aceLocalIsHealthy) {
+        Write-WatchdogLog 'Local ACE-Step API is healthy.'
+      } else {
+        Write-WatchdogLog 'Local ACE-Step process exists but is loading or temporarily unavailable; leaving it running.'
+      }
+      $aceLocalWasHealthy = $aceLocalIsHealthy
+    }
+
+    if (-not (Get-VideoWatchdogProcesses)) {
+      Write-WatchdogLog 'Video soundtrack watchdog was unavailable; restarting it.'
+      Start-HiddenScript 'video-watchdog.ps1' '.video-watchdog.out.log' '.video-watchdog.err.log'
+      Start-Sleep -Seconds 3
+    }
+
+    $videoIsHealthy = Test-VideoService
+    if ($videoWasHealthy -ne $videoIsHealthy) {
+      if ($videoIsHealthy) {
+        Write-WatchdogLog 'Video soundtrack service is healthy.'
+      } else {
+        Write-WatchdogLog 'Video soundtrack service is preparing or unavailable; video watchdog will recover it.'
+      }
+      $videoWasHealthy = $videoIsHealthy
     }
 
     if (-not (Get-TunnelProcesses)) {

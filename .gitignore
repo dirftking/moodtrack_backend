@@ -15,6 +15,10 @@ backend/backend/storage/
 *.sqlite
 
 # Local runtime configuration and logs
+.env
+.env.local
+.env.*.local
+!.env.example
 .tunnel-url.txt
 *.log
 

@@ -2,6 +2,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc && vite build && node scripts/prepare-sites-build.mjs",
+    "generate:emotion-library": "node scripts/generate-emotion-reference-library.mjs",
+    "test:cloud-adapter": "node scripts/test-ace-cloud-adapter.mjs",
+    "test:local-adapter": "node scripts/test-ace-local-adapter.mjs",
+    "test:freshness": "node scripts/test-audio-freshness.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

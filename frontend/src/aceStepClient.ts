@@ -1,7 +1,17 @@
-type MoodPoint = {
-  label: string
-  time: number
-  intensity: number
+import type { EmotionAnalysis, EmotionId, MoodPointInput } from '../shared/emotions'
+
+type MoodPoint = MoodPointInput
+
+export type EmotionReferenceInfo = {
+  id: string
+  emotionId: EmotionId
+  labelZh: string
+  labelEn: string
+  available: boolean
+}
+
+export type EmotionAnalysisResult = EmotionAnalysis & {
+  reference: EmotionReferenceInfo | null
 }
 
 type AceStepOptions = {
@@ -16,13 +26,16 @@ type AceStepOptions = {
   bpm: number
   duration: number
   moods: MoodPoint[]
+  emotionDescription: string
   instrumental: boolean
   vocalStyle: string
   vocalLanguage: string
   lyrics: string
   variation: number
+  excludedAudioDigests?: string[]
   onStatus?: (message: string) => void
   onLyricsGenerated?: (lyrics: string) => void
+  onEmotionClassified?: (analysis: EmotionAnalysisResult) => void
 }
 
 type ApiEnvelope<T> = {
@@ -45,13 +58,30 @@ type GeneratedFile = {
   seed_value?: string
   dit_model?: string
   lm_model?: string
+  lyrics?: string
+  caption?: string
+  emotion_analysis?: EmotionAnalysis
+  reference_audio?: EmotionReferenceInfo | null
+  moodtrack_audio_digest?: string
+  moodtrack_audio_duration?: number
   metas?: {
     duration?: number
   }
 }
 
+export function resolveGeneratedEmotionMetadata(
+  generated: GeneratedFile,
+  fallbackAnalysis: EmotionAnalysisResult | null | undefined,
+) {
+  const reference = null
+  const emotionAnalysis = generated.emotion_analysis
+    ? { ...generated.emotion_analysis, referenceEmotionId: null, reference }
+    : fallbackAnalysis ? { ...fallbackAnalysis, referenceEmotionId: null, reference } : null
+  return { emotionAnalysis, reference }
+}
+
 export type AceStepSoundtrack = {
-  audio: Blob
+  audioUrl: string
   taskId: string
   seed: string
   model: string
@@ -59,9 +89,13 @@ export type AceStepSoundtrack = {
   variationName: string
   lyrics: string
   sourceFile: string
+  emotionAnalysis: EmotionAnalysisResult | null
+  reference: EmotionReferenceInfo | null
+  audioDigest: string
 }
 
 export type AceStepRepaintOptions = {
+  sourceTaskId: string
   sourceFile: string
   prompt: string
   lyrics: string
@@ -73,13 +107,8 @@ export type AceStepRepaintOptions = {
   start: number
   end: number
   strength: number
+  excludedAudioDigests?: string[]
   onStatus?: (message: string) => void
-}
-
-type CreatedSample = {
-  caption?: string
-  lyrics?: string
-  vocal_language?: string
 }
 
 type CompositionVariant = {
@@ -121,21 +150,20 @@ const compositionVariants: Record<string, CompositionVariant[]> = {
     { name: '极简倒计时', direction: 'Minimal countdown architecture using repeated single-note pulses, strategic silence and one powerful impact.', section: '[Instrumental - single-note countdown pulses and strategic silence lead to one powerful impact]' },
     { name: '未来律动', direction: 'Groove-led futuristic cue with offbeat plucks, elastic pulse bass and a contrasting filtered middle section.', section: '[Instrumental - offbeat plucks and elastic bass establish a futuristic groove with filtered contrast]' },
   ],
+  freeform: [
+    {
+      name: '自由指令',
+      direction: 'Follow the user-provided prompt as the primary creative specification. Do not introduce any scene-preset genre, instrumentation, harmony or narrative.',
+      section: '',
+    },
+  ],
 }
 
 const fallbackVariants = compositionVariants.midnight
-const harmonicDirections = [
-  'Use a descending progression with changing chord inversions.',
-  'Hold a tonic pedal while the upper chords shift above it.',
-  'Use modal interchange and one unexpected chromatic-mediant turn.',
-  'Use suspended harmony with delayed resolution and a moving bass line.',
-  'Alternate a compact two-chord cell before a contrasting bridge progression.',
-  'Use through-composed harmonic motion instead of a repeating four-chord loop.',
-]
-
 const API_BASE = '/ace-step'
 const POLL_INTERVAL = 2_000
 const GENERATION_TIMEOUT = 10 * 60_000
+const MAX_GENERATION_PROMPT_LENGTH = 1_200
 
 function sleep(milliseconds: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds))
@@ -146,11 +174,11 @@ async function readEnvelope<T>(response: Response) {
   try {
     payload = await response.json() as ApiEnvelope<T>
   } catch {
-    throw new Error(`HeartArt 返回了无法解析的响应（HTTP ${response.status}）`)
+    throw new Error(`MoodTrack 返回了无法解析的响应（HTTP ${response.status}）`)
   }
 
   if (!response.ok || payload.code !== 200 || payload.error) {
-    throw new Error(payload.error || `HeartArt 请求失败（HTTP ${response.status}）`)
+    throw new Error(payload.error || `MoodTrack 请求失败（HTTP ${response.status}）`)
   }
 
   return payload.data
@@ -169,35 +197,81 @@ async function postJson<T>(path: string, body: unknown, timeout = 30_000) {
 function selectCompositionVariant(options: AceStepOptions) {
   const variants = compositionVariants[options.presetId] ?? fallbackVariants
   const index = Math.abs(Math.round(options.variation)) % variants.length
-  const variant = variants[index]
-  return {
-    ...variant,
-    direction: `${variant.direction} ${harmonicDirections[index % harmonicDirections.length]}`,
-  }
+  return variants[index]
 }
 
-function buildPrompt(options: AceStepOptions, variant: CompositionVariant, generatedCaption = '') {
+function trimPromptPart(value: string, maximum: number) {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maximum) return normalized
+  if (maximum <= 0) return ''
+
+  const candidate = normalized.slice(0, maximum + 1)
+  const sentenceBoundary = Math.max(
+    candidate.lastIndexOf('. '),
+    candidate.lastIndexOf('。'),
+    candidate.lastIndexOf('! '),
+    candidate.lastIndexOf('? '),
+    candidate.lastIndexOf('; '),
+  )
+  if (sentenceBoundary >= Math.min(160, Math.floor(maximum * 0.6))) {
+    return candidate.slice(0, sentenceBoundary + 1).trim()
+  }
+  const wordBoundary = candidate.lastIndexOf(' ')
+  return candidate.slice(0, wordBoundary > 0 ? wordBoundary : maximum).trim()
+}
+
+function joinPromptParts(parts: string[]) {
+  let prompt = ''
+  for (const rawPart of parts) {
+    const part = rawPart.replace(/\s+/g, ' ').trim()
+    if (!part) continue
+    const separator = prompt ? ' ' : ''
+    const available = MAX_GENERATION_PROMPT_LENGTH - prompt.length - separator.length
+    if (available <= 0) break
+    const next = trimPromptPart(part, available)
+    if (!next) break
+    prompt += `${separator}${next}`
+    if (next.length < part.length) break
+  }
+  return prompt
+}
+
+export function buildPrompt(options: AceStepOptions, variant: CompositionVariant, analysis?: EmotionAnalysisResult) {
+  const freeform = options.presetId === 'freeform'
   const emotionalArc = [...options.moods]
     .sort((left, right) => left.time - right.time)
-    .map((point) => `${point.time}s ${point.intensity}% energy`)
+    .map((point) => `${point.time}s ${point.label} at ${point.intensity}% intensity`)
     .join(', ')
 
   const vocalDirection = options.instrumental
     ? 'Strictly instrumental. No singing, spoken word or choir.'
-    : `Vocal song with a clearly audible lead singer. Vocal direction: ${options.vocalStyle.slice(0, 120)}. Keep the lead vocal intelligible and forward in the mix; sing every lyric section instead of treating the voice as ambience.`
+    : options.vocalStyle.trim()
+      ? `Vocal song with a clearly audible lead singer. Vocal direction: ${options.vocalStyle.slice(0, 120)}. Keep the lead vocal intelligible and forward in the mix; sing every lyric section instead of treating the voice as ambience.`
+      : 'Vocal song with a clearly audible lead singer. Follow the user prompt for vocal character and keep every lyric section intelligible and forward in the mix.'
   const productionBase = options.instrumental
     ? options.productionPrompt
     : options.productionPrompt
         .replace(/^Instrumental\s+/i, '')
         .replace(/\s*No\s+([^.]*?)(?:,?\s+or\s+vocals|,?\s+vocals)(\.)/gi, ' No $1$2')
         .trim()
-  const compositionDirection = `New composition approach: ${variant.direction}`
-  const lyricDirection = generatedCaption ? `Fresh lyric concept: ${generatedCaption.slice(0, 140)}` : ''
-  const userDirection = `Creative direction: ${options.style.slice(0, 80)}`
-  const energyDirection = `Energy: ${emotionalArc}`
-  const reservedLength = vocalDirection.length + compositionDirection.length + lyricDirection.length + userDirection.length + energyDirection.length + 5
-  const productionPrompt = productionBase.slice(0, Math.max(80, 640 - reservedLength)).trim()
-  return `${vocalDirection} ${productionPrompt} ${compositionDirection} ${lyricDirection} ${userDirection} ${energyDirection}`.slice(0, 640)
+  if (freeform) return joinPromptParts([vocalDirection, productionBase])
+
+  const compositionDirection = `Arrangement variation: ${variant.direction}`
+  const canonicalDirection = analysis && !analysis.fallback
+    ? `Overall emotion: ${analysis.primary.labelEn}.`
+    : ''
+  const userEmotion = options.emotionDescription.trim()
+    ? `User emotion description: ${options.emotionDescription.trim().slice(0, 260)}.`
+    : ''
+  const energyDirection = emotionalArc ? `Emotional arc: ${emotionalArc}.` : ''
+  return joinPromptParts([
+    vocalDirection,
+    productionBase,
+    compositionDirection,
+    canonicalDirection,
+    userEmotion,
+    energyDirection,
+  ])
 }
 
 const vocalLanguageNames: Record<string, string> = {
@@ -207,21 +281,21 @@ const vocalLanguageNames: Record<string, string> = {
   ko: 'Korean',
 }
 
-function comparableLyrics(value: string) {
-  return value.toLowerCase().replace(/\s+/g, '').replace(/[^\p{L}\p{N}]/gu, '')
-}
-
-function buildLyricQuery(options: AceStepOptions, variant: CompositionVariant, attempt: number) {
+export function buildLyricQuery(options: AceStepOptions, variant: CompositionVariant, attempt: number, analysis?: EmotionAnalysisResult) {
   const moodArc = [...options.moods]
     .sort((left, right) => left.time - right.time)
     .map((point) => `${point.label} ${point.intensity}%`)
     .join(' -> ')
   const language = vocalLanguageNames[options.vocalLanguage] ?? 'the selected language'
   const nonce = `${options.variation}-${Date.now()}-${attempt}-${Math.random().toString(36).slice(2, 9)}`
+  const agentDirection = analysis && !analysis.fallback
+    ? `Text Emotion Agent category: ${analysis.summary}.`
+    : 'Text Emotion Agent found no confident standard category; preserve the original wording without adding a default emotion.'
   return [
     `Write completely new, original song lyrics in ${language}.`,
     `Title concept: ${options.title}. Scene: ${options.scene}.`,
     `Music style: ${options.style}. Vocal direction: ${options.vocalStyle}.`,
+    `Emotional intent: ${options.emotionDescription || moodArc}. ${agentDirection}`,
     `Emotional arc: ${moodArc}. Target song length: about ${Math.round(options.duration)} seconds.`,
     `Composition variation: ${variant.name}. Use concise, singable lines and a memorable chorus.`,
     'Use section tags such as [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Bridge], and [Outro].',
@@ -229,39 +303,6 @@ function buildLyricQuery(options: AceStepOptions, variant: CompositionVariant, a
     `Creative nonce: ${nonce}.`,
     `Previous draft to avoid:\n${options.lyrics.slice(0, 1_600)}`,
   ].join('\n')
-}
-
-async function createFreshLyrics(options: AceStepOptions, variant: CompositionVariant) {
-  const previous = comparableLyrics(options.lyrics)
-  let lastError: unknown
-
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    options.onStatus?.(`HeartArt 正在创作第 ${attempt} 版全新歌词…`)
-    try {
-      const sample = await postJson<CreatedSample>('/v1/create_sample', {
-        query: buildLyricQuery(options, variant, attempt),
-        instrumental: false,
-        vocal_language: options.vocalLanguage,
-        temperature: 0.96 + Math.random() * 0.14,
-      }, 150_000)
-      const nextLyrics = String(sample.lyrics || '').trim()
-      if (nextLyrics && comparableLyrics(nextLyrics) !== previous && !/^\[Instrumental\]$/i.test(nextLyrics)) {
-        options.onLyricsGenerated?.(nextLyrics)
-        return { lyrics: nextLyrics, caption: String(sample.caption || '').trim() }
-      }
-      lastError = new Error('HeartArt 返回了与上一版相同的歌词')
-    } catch (error) {
-      lastError = error
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error('全新歌词生成失败，请再试一次')
-}
-
-function buildInstrumentalStructure(base: string, variant: CompositionVariant) {
-  const outroPosition = base.lastIndexOf('\n[Outro')
-  if (outroPosition < 0) return `${base}\n${variant.section}`
-  return `${base.slice(0, outroPosition)}\n${variant.section}${base.slice(outroPosition)}`
 }
 
 function parseGeneratedFiles(value: TaskResult['result']) {
@@ -275,12 +316,33 @@ function parseGeneratedFiles(value: TaskResult['result']) {
   }
 }
 
-function proxiedAudioUrl(file: string) {
+function proxiedAudioUrl(file: string, taskId: string) {
+  const cacheBust = `moodtrack_task=${encodeURIComponent(taskId)}&fresh=${Date.now()}-${Math.random().toString(36).slice(2)}`
   if (file.startsWith('http://') || file.startsWith('https://')) {
     const url = new URL(file)
-    return `${API_BASE}${url.pathname}${url.search}`
+    return `${API_BASE}${url.pathname}${url.search}${url.search ? '&' : '?'}${cacheBust}`
   }
-  return `${API_BASE}${file.startsWith('/') ? '' : '/'}${file}`
+  return `${API_BASE}${file.startsWith('/') ? '' : '/'}${file}${file.includes('?') ? '&' : '?'}${cacheBust}`
+}
+
+function validateServerAudioMetadata(
+  generated: GeneratedFile,
+  expectedDuration: number,
+  excludedAudioDigests: string[] = [],
+) {
+  const digest = String(generated.moodtrack_audio_digest || '').toLowerCase()
+  const actualDuration = Number(generated.moodtrack_audio_duration)
+  if (!/^[a-f0-9]{64}$/.test(digest)) {
+    throw new Error('MoodTrack 没有返回可验证的音频指纹')
+  }
+  if (excludedAudioDigests.some((value) => value.toLowerCase() === digest)) {
+    throw new Error('MoodTrack 返回了旧音频结果，已阻止覆盖')
+  }
+  const tolerance = Math.max(1.5, expectedDuration * 0.08)
+  if (!Number.isFinite(actualDuration) || Math.abs(actualDuration - expectedDuration) > tolerance) {
+    throw new Error(`MoodTrack 音频时长校验失败（期望 ${expectedDuration}s，实际 ${Number.isFinite(actualDuration) ? actualDuration.toFixed(1) : '未知'}s）`)
+  }
+  return { digest, duration: actualDuration }
 }
 
 export async function checkAceStepHealth() {
@@ -293,25 +355,50 @@ export async function checkAceStepHealth() {
   }
 }
 
+async function classifyEmotion(options: AceStepOptions) {
+  return postJson<EmotionAnalysisResult>('/emotions/classify', {
+    title: options.title,
+    scene: options.scene,
+    style: options.style,
+    description: options.emotionDescription,
+    duration: options.duration,
+    moods: options.moods,
+  }, 10_000)
+}
+
 export async function generateAceStepSoundtrack(options: AceStepOptions): Promise<AceStepSoundtrack> {
   const duration = Math.max(10, Math.min(180, Math.round(options.duration || 60)))
   const variant = selectCompositionVariant(options)
   let generatedLyrics = options.lyrics.trim()
-  let generatedCaption = ''
-  if (!options.instrumental) {
-    const fresh = await createFreshLyrics(options, variant)
-    generatedLyrics = fresh.lyrics
-    generatedCaption = fresh.caption
+  let emotionAnalysis: EmotionAnalysisResult | undefined
+  options.onStatus?.('Text Emotion Agent 正在归一化情绪描述…')
+  try {
+    emotionAnalysis = await classifyEmotion(options)
+    emotionAnalysis = { ...emotionAnalysis, referenceEmotionId: null, reference: null }
+    options.onEmotionClassified?.(emotionAnalysis)
+    options.onStatus?.(emotionAnalysis.fallback
+      ? 'Text Emotion Agent：未找到高置信度标准类别 · 保留原始描述并使用纯文本情绪引导'
+      : `Text Emotion Agent：${emotionAnalysis.summary} · 使用纯文本情绪引导`)
+  } catch {
+    options.onStatus?.('Text Emotion Agent 暂不可用，将保留原始情绪描述继续生成')
   }
-  options.onStatus?.(`正在向 HeartArt 提交「${variant.name}」编曲…`)
+  const generationPrompt = buildPrompt(options, variant, emotionAnalysis)
+  const sampleQuery = options.instrumental
+    ? ''
+    : `${buildLyricQuery(options, variant, 1, emotionAnalysis)}\nSound and arrangement direction:\n${generationPrompt}`
+  options.onStatus?.(`正在向 MoodTrack 提交「${variant.name}」编曲…`)
 
   const created = await postJson<{ task_id: string }>('/release_task', {
     task_type: 'text2music',
-    prompt: buildPrompt(options, variant, generatedCaption),
-    lyrics: options.instrumental ? buildInstrumentalStructure(options.instrumentalStructure, variant) : generatedLyrics,
+    prompt: generationPrompt,
+    lyrics: options.instrumental ? options.instrumentalStructure : '',
+    sample_mode: !options.instrumental,
+    sample_query: sampleQuery,
     instrumental: options.instrumental,
     vocal_language: options.instrumental ? 'unknown' : options.vocalLanguage,
-    thinking: false,
+    thinking: true,
+    use_cot_caption: false,
+    use_cot_language: false,
     model: 'acestep-v15-turbo',
     audio_format: 'wav',
     bpm: options.bpm,
@@ -321,15 +408,23 @@ export async function generateAceStepSoundtrack(options: AceStepOptions): Promis
     inference_steps: 8,
     batch_size: 1,
     use_random_seed: true,
-  })
+    emotion_context: {
+      title: options.title,
+      scene: options.scene,
+      style: options.style,
+      description: options.emotionDescription,
+      duration,
+      moods: options.moods,
+    },
+  }, 30_000)
 
-  if (!created.task_id) throw new Error('HeartArt 没有返回任务编号')
+  if (!created.task_id) throw new Error('MoodTrack 没有返回任务编号')
 
   const startedAt = Date.now()
   while (Date.now() - startedAt < GENERATION_TIMEOUT) {
     await sleep(POLL_INTERVAL)
     const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1_000))
-    options.onStatus?.(`HeartArt 正在生成真实音频 · ${elapsed}s`)
+    options.onStatus?.(`MoodTrack 正在生成真实音频 · ${elapsed}s`)
 
     let tasks: Array<TaskResult>
     try {
@@ -342,35 +437,42 @@ export async function generateAceStepSoundtrack(options: AceStepOptions): Promis
       }
       throw error
     }
-    const task = tasks.find((item) => item.task_id === created.task_id) ?? tasks[0]
+    const task = tasks.find((item) => item.task_id === created.task_id)
+    if (!task && tasks.length) throw new Error('MoodTrack 返回了其他任务的结果，已阻止旧音频覆盖')
     if (!task || task.status === 0) continue
     if (task.status === 2) {
-      throw new Error(task.error || task.message || 'HeartArt 音乐生成失败')
+      throw new Error(task.error || task.message || 'MoodTrack 音乐生成失败')
     }
 
     const files = parseGeneratedFiles(task.result)
     const generated = files.find((item) => item.status === 1 && item.file) ?? files.find((item) => item.file)
-    if (!generated?.file) throw new Error('HeartArt 已完成任务，但没有返回音频文件')
+    if (!generated?.file) throw new Error('MoodTrack 已完成任务，但没有返回音频文件')
 
-    options.onStatus?.('正在读取 HeartArt 生成的 WAV…')
-    const audioResponse = await fetch(proxiedAudioUrl(generated.file))
-    if (!audioResponse.ok) throw new Error(`无法读取 HeartArt 音频（HTTP ${audioResponse.status}）`)
-    const audio = await audioResponse.blob()
-    if (!audio.size) throw new Error('HeartArt 返回了空音频')
+    if (!options.instrumental && generated.lyrics?.trim()) {
+      generatedLyrics = generated.lyrics.trim()
+      options.onLyricsGenerated?.(generatedLyrics)
+    }
+
+    options.onStatus?.('正在校验 MoodTrack 音频指纹…')
+    const validated = validateServerAudioMetadata(generated, duration, options.excludedAudioDigests)
+    const metadata = resolveGeneratedEmotionMetadata(generated, emotionAnalysis)
 
     return {
-      audio,
+      audioUrl: proxiedAudioUrl(generated.file, created.task_id),
       taskId: created.task_id,
       seed: generated.seed_value || '',
-      model: generated.dit_model || 'acestep-v15-turbo',
-      duration: Number(generated.metas?.duration) || duration,
+      model: generated.dit_model || 'acemusic/acestep-v15-turbo',
+      duration: validated.duration,
       variationName: variant.name,
       lyrics: generatedLyrics,
       sourceFile: generated.file,
+      emotionAnalysis: metadata.emotionAnalysis,
+      reference: metadata.reference,
+      audioDigest: validated.digest,
     }
   }
 
-  throw new Error('HeartArt 生成超时，请稍后重试')
+  throw new Error('MoodTrack 生成超时，请稍后重试')
 }
 
 export async function repaintAceStepSoundtrack(options: AceStepRepaintOptions): Promise<AceStepSoundtrack> {
@@ -378,12 +480,17 @@ export async function repaintAceStepSoundtrack(options: AceStepRepaintOptions): 
   const start = Math.max(0, Math.min(duration - 1, Number(options.start) || 0))
   const end = Math.max(start + 0.5, Math.min(duration, Number(options.end) || duration))
   const strength = Math.max(0.05, Math.min(1, Number(options.strength) || 0.65))
+  const preservedLyrics = options.instrumental ? '[Instrumental]' : options.lyrics.trim()
+  if (!options.instrumental && !preservedLyrics) {
+    throw new Error('人声歌曲局部重绘需要保留源版本歌词')
+  }
   options.onStatus?.(`正在局部重绘 ${Math.round(start)}s–${Math.round(end)}s…`)
 
   const created = await postJson<{ task_id: string }>('/release_task', {
     task_type: 'repaint',
+    source_task_id: options.sourceTaskId,
     prompt: `Preserve the original song outside the selected range. Inside ${start.toFixed(1)}s to ${end.toFixed(1)}s, apply this edit: ${options.prompt.slice(0, 800)}`,
-    lyrics: options.instrumental ? '[Instrumental]' : options.lyrics.trim(),
+    lyrics: preservedLyrics,
     instrumental: options.instrumental,
     vocal_language: options.instrumental ? 'unknown' : options.vocalLanguage,
     source_file: options.sourceFile,
@@ -401,13 +508,13 @@ export async function repaintAceStepSoundtrack(options: AceStepRepaintOptions): 
     use_random_seed: true,
   })
 
-  if (!created.task_id) throw new Error('HeartArt 没有返回局部重绘任务编号')
+  if (!created.task_id) throw new Error('MoodTrack 没有返回局部重绘任务编号')
 
   const startedAt = Date.now()
   while (Date.now() - startedAt < GENERATION_TIMEOUT) {
     await sleep(POLL_INTERVAL)
     const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1_000))
-    options.onStatus?.(`HeartArt 正在合成局部修改版本 · ${elapsed}s`)
+    options.onStatus?.(`MoodTrack 正在合成局部修改版本 · ${elapsed}s`)
 
     let tasks: Array<TaskResult>
     try {
@@ -419,31 +526,34 @@ export async function repaintAceStepSoundtrack(options: AceStepRepaintOptions): 
       throw error
     }
 
-    const task = tasks.find((item) => item.task_id === created.task_id) ?? tasks[0]
+    const task = tasks.find((item) => item.task_id === created.task_id)
+    if (!task && tasks.length) throw new Error('MoodTrack 返回了其他局部重绘任务，已阻止旧版本覆盖')
     if (!task || task.status === 0) continue
-    if (task.status === 2) throw new Error(task.error || task.message || 'HeartArt 局部重绘失败')
+    if (task.status === 2) throw new Error(task.error || task.message || 'MoodTrack 局部重绘失败')
 
     const files = parseGeneratedFiles(task.result)
     const generated = files.find((item) => item.status === 1 && item.file) ?? files.find((item) => item.file)
-    if (!generated?.file) throw new Error('HeartArt 已完成局部重绘，但没有返回音频文件')
+    if (!generated?.file) throw new Error('MoodTrack 已完成局部重绘，但没有返回音频文件')
 
-    options.onStatus?.('正在读取局部修改后的 WAV…')
-    const audioResponse = await fetch(proxiedAudioUrl(generated.file))
-    if (!audioResponse.ok) throw new Error(`无法读取局部重绘音频（HTTP ${audioResponse.status}）`)
-    const audio = await audioResponse.blob()
-    if (!audio.size) throw new Error('HeartArt 返回了空的局部重绘音频')
+    options.onStatus?.('正在校验局部修改音频指纹…')
+    const validated = validateServerAudioMetadata(generated, duration, options.excludedAudioDigests)
 
     return {
-      audio,
+      audioUrl: proxiedAudioUrl(generated.file, created.task_id),
       taskId: created.task_id,
       seed: generated.seed_value || '',
-      model: generated.dit_model || 'acestep-v15-turbo',
-      duration: Number(generated.metas?.duration) || duration,
+      model: generated.dit_model || 'acemusic/acestep-v15-turbo',
+      duration: validated.duration,
       variationName: `局部重绘 ${Math.round(start)}s–${Math.round(end)}s`,
-      lyrics: options.lyrics,
+      lyrics: preservedLyrics,
       sourceFile: generated.file,
+      emotionAnalysis: generated.emotion_analysis
+        ? { ...generated.emotion_analysis, reference: null }
+        : null,
+      reference: null,
+      audioDigest: validated.digest,
     }
   }
 
-  throw new Error('HeartArt 局部重绘超时，请稍后重试')
+  throw new Error('MoodTrack 局部重绘超时，请稍后重试')
 }

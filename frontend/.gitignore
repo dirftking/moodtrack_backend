@@ -1,5 +1,11 @@
 node_modules/
 dist/
+.env
+.env.local
+.env.*.local
+.env.gvmgen.local
+!.env.example
+!.env.gvmgen.example
 .vite-demo.log
 .vite-demo.err.log
 .tunnel.log
@@ -8,7 +14,11 @@ dist/
 .watchdog.log
 .watchdog.out.log
 .watchdog.err.log
+.video-watchdog.out.log
+.video-watchdog.err.log
 services/ACE-Step-1.5/
 .ace-step.out.log
 .ace-step.err.log
+.gvmgen-service*.log
+.gvmgen-output/
 *.tgz
